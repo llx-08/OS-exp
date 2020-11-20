@@ -93,11 +93,19 @@
  *      Try to merge blocks at lower or higher addresses. Notice: This should
  *  change some pages' `p->property` correctly.
  */
+
+// ？？并没有在list.h里找到这个的结构
 free_area_t free_area;
 
-#define free_list (free_area.free_list)
-#define nr_free (free_area.nr_free)
+#define free_list (free_area.free_list)     //空闲块的头
+#define nr_free (free_area.nr_free) // 空闲块的总数
 
+/*
+ * (2) `default_init`:
+ *  You can reuse the demo `default_init` function to initialize the `free_list`
+ * and set `nr_free` to 0. `free_list` is used to record the free memory blocks.
+ * `nr_free` is the total number of the free memory blocks.
+ */
 static void
 default_init(void) {
     list_init(&free_list);
@@ -105,49 +113,117 @@ default_init(void) {
 }
 
 // 需要注意，default_init_memmap default_alloc_pages default_free_pages 三个函数只是给大家提供一点思路
-// 需要大家去重写函数
+// 需要去重写函数
 // 这里需要大家去理解通用链表结构 即list_entry_t与Page结构的关系
 // 注意在分配和回收Page时候，注意设置FLAGS property等数据结构
+/*
+ * (3) `default_init_memmap`:
+ *  CALL GRAPH: `kern_init` --> `pmm_init` --> `page_init` --> `init_memmap` -->
+ * `pmm_manager` --> `init_memmap`.
+ *  This function is used to initialize a free block (with parameter `addr_base`,
+ * `page_number`). In order to initialize a free block, firstly, you should
+ * initialize each page (defined in memlayout.h) in this free block. This
+ * procedure includes:
+ *  - Setting the bit `PG_property` of `p->flags`, which means this page is
+ * valid. P.S. In function `pmm_init` (in pmm.c), the bit `PG_reserved` of
+ * `p->flags` is already set.
+ *  - If this page is free and is not the first page of a free block,
+ * `p->property` should be set to 0.
+ *  - If this page is free and is the first page of a free block, `p->property`
+ * should be set to be the total number of pages in the block.
+ *  - `p->ref` should be 0, because now `p` is free and has no reference.
+ *  After that, We can use `p->page_link` to link this page into `free_list`.
+ * (e.g.: `list_add_before(&free_list, &(p->page_link));` )
+ *  Finally, we should update the sum of the free memory blocks: `nr_free += n`.
+ */
 static void
 default_init_memmap(struct Page *base, size_t n) {
     assert(n > 0);
     struct Page *p = base;
+
+    // 遍历所有空闲page：
+    // 1. 将描述空闲块数目的property置零(故该成员变量只有在整个空闲块的第一个page中才有意义),
+    // 2. 清空这些物理页的引用计数ref,
+    // 3. 设置flags = PG_property = 1将物理页标记为空闲可分配状态
     for (; p != base + n; p ++) {
         assert(PageReserved(p));
-        p->flags = p->property = 0;
+        // flags: 物理页的状态：空闲与否
+        // property: 描述空闲块的数目, used in first fit pm manager
+        p->flags = p->property = 0; 
         set_page_ref(p, 0);
+        // SetPageProperty在memelayout.h中定义为: set_bit(PG_property, &((page)->flags))
+        // 即令flags = PG_property = 1，表示该页可分配
+        SetPageProperty(p);
     }
+
+    // 对空闲块的第一个page进行初始化（完成初始化空闲页信息的工作）：
+    // 1. 设置块内共有空闲page = n
+    // 2. 更新所有空闲page数量的全局变量nr_free = n
+    // 3. 将该空闲块插入到空闲内存块链表中(使用块内第一个page的首部地址作为块地址)
     base->property = n;
-    SetPageProperty(base);
-    nr_free += n;
+    
+    nr_free += n;   // 设置当前空闲page总数为n
     list_add(&free_list, &(base->page_link));
 }
 
+/*
+(4) `default_alloc_pages`: 
+ *  Search for the first free block (block size >= n) in the free list and reszie
+ * the block found, returning the address of this block as the address required by
+ * `malloc`.
+*/
+// 以下为first-fit算法实现的空闲页分配
 static struct Page *
 default_alloc_pages(size_t n) {
     assert(n > 0);
+    // 无空闲页可分配
     if (n > nr_free) {
         return NULL;
     }
+
     struct Page *page = NULL;
+    // (4.1) So you should search the free list like this : 
     list_entry_t *le = &free_list;
-    while ((le = list_next(le)) != &free_list) {
+
+    //  (4.1.1) In the while loop, get the struct `page` and
+    // check if `p->property`(recording the num of free pages in this block) >= n.
+    while ((le = list_next(le)) != &free_list)
+    {
+        // convert list entry to page
+        // 定义在memelayout.h中：le2page(le, member)    to_struct((le), struct Page, member)
         struct Page *p = le2page(le, page_link);
+        // 碰到第一个页数满足条件的块就停止（首次适应思想）
         if (p->property >= n) {
             page = p;
             break;
         }
     }
+    
+    // (4.1.2) 若找到了满足条件的空闲块
     if (page != NULL) {
+        // 通过变量page（显示所选中的块中第一块能分的page）定位到要分配的页
+        // 分配n页后终止
+        // 分配时将page的flags置为0（即已分配状态）
+        for (struct Page *tp = page; tp != page + n; tp++) {
+            // 定义在memelayout.h中：ClearPageProperty(page) clear_bit(PG_property, &((page)->flags))
+            ClearPageProperty(tp);
+        }
+
+        // 在freelist中删除该分配出去的块
         list_del(&(page->page_link));
+
+        // 在原位插入一个减去分配出去的页数的空闲块，替代原空闲块
         if (page->property > n) {
             struct Page *p = page + n;
             p->property = page->property - n;
             list_add(&free_list, &(p->page_link));
-    }
+        }
+        // (4.1.3) Re - caluclate `nr_free` (number of the the rest of all free block).
         nr_free -= n;
-        ClearPageProperty(page);
     }
+
+    // (4.1.4) return `p`.
+    // (4.2) If we can not find a free block with its size >=n, then return NULL.
     return page;
 }
 
