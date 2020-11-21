@@ -1,0 +1,4 @@
+file obj/bootblock.o
+set arch i8086
+target remote :1234
+
