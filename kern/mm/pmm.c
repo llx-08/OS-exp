@@ -330,19 +330,9 @@ pmm_init(void) {
 
 }
 
-//get_pte - get pte and return the kernel virtual address of this pte for la
-//        - if the PT contians this pte didn't exist, alloc a page for PT
-// parameter:
-//  pgdir:  the kernel virtual base address of PDT
-//  la:     the linear address need to map
-//  create: a logical value to decide if alloc a page for PT
-// return vaule: the kernel virtual address of this pte
-// 注意返回的是PTE的指针，而不是PTE
-// 注意指针类型
-// 注意区分地址的属性，虚地址or物理地址
 pte_t *
 get_pte(pde_t *pgdir, uintptr_t la, bool create) {
-  pde_t* pdep = &pgdir[PDX(la)];
+	pde_t* pdep = &pgdir[PDX(la)];
 	if (!(*pdep & PTE_P)) {
 		if (create) {
 			struct Page *page = alloc_page();
@@ -359,41 +349,8 @@ get_pte(pde_t *pgdir, uintptr_t la, bool create) {
 	}
 	uintptr_t* pt_va = KADDR(PDE_ADDR(*pdep));
 	//cprintf("here \n");
-	pte_t* ptep = &pt_va[PTX(la)];
+	pte_t* ptep = &pt_va[PTX(la)];		 
 	return ptep;
-    /* LAB2 EXERCISE 2: YOUR CODE
-     *
-     * If you need to visit a physical address, please use KADDR()
-     * please read pmm.h for useful macros
-     *
-     * Maybe you want help comment, BELOW comments can help you finish the code
-     *
-     * Some Useful MACROs and DEFINEs, you can use them in below implementation.
-     * MACROs or Functions:
-     *   PDX(la) = the index of page directory entry of VIRTUAL ADDRESS la.
-     *   KADDR(pa) : takes a physical address and returns the corresponding kernel virtual address.
-     *   set_page_ref(page,1) : means the page be referenced by one time
-     *   page2pa(page): get the physical address of memory which this (struct Page *) page  manages
-     *   struct Page * alloc_page() : allocation a page
-     *   memset(void *s, char c, size_t n) : sets the first n bytes of the memory area pointed by s
-     *                                       to the specified value c.
-     * DEFINEs:
-     *   PTE_P           0x001                   // page table/directory entry flags bit : Present
-     *   PTE_W           0x002                   // page table/directory entry flags bit : Writeable
-     *   PTE_U           0x004                   // page table/directory entry flags bit : User can access
-     */
-#if 0
-    pde_t *pdep = NULL;   // (1) find page directory entry
-    if (0) {              // (2) check if entry is not present
-                          // (3) check if creating is needed, then alloc page for page table
-                          // CAUTION: this page is used for page table, not for common data page
-                          // (4) set page reference
-        uintptr_t pa = 0; // (5) get linear address of page
-                          // (6) clear page content using memset
-                          // (7) set page directory entry's permission
-    }
-    return NULL;          // (8) return page table entry
-#endif
 }
 
 //get_page - get related Page struct for linear address la using PDT pgdir
@@ -412,45 +369,24 @@ get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store) {
 //page_remove_pte - free an Page sturct which is related linear address la
 //                - and clean(invalidate) pte which is related linear address la
 //note: PT is changed, so the TLB need to be invalidate
-static inline void
-page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {
 
-  if ((*ptep & PTE_P)) {
-		struct Page *page = pte2page(*ptep);
-		if (page == NULL) return;
-		page_ref_dec(page);
-		if (page->ref == 0) {
-			free_page(page);
-			tlb_invalidate(pgdir, la);
-		}
-	}
-	((pte_t *)KADDR(PDE_ADDR(pgdir[PDX(la)])))[PTX(la)] = NULL;
-    /* LAB2 EXERCISE 3: YOUR CODE
-     *
-     * Please check if ptep is valid, and tlb must be manually updated if mapping is updated
-     *
-     * Maybe you want help comment, BELOW comments can help you finish the code
-     *
-     * Some Useful MACROs and DEFINEs, you can use them in below implementation.
-     * MACROs or Functions:
-     *   struct Page *page pte2page(*ptep): get the according page from the value of a ptep
-     *   free_page : free a page
-     *   page_ref_dec(page) : decrease page->ref. NOTICE: ff page->ref == 0 , then this page should be free.
-     *   tlb_invalidate(pde_t *pgdir, uintptr_t la) : Invalidate a TLB entry, but only if the page tables being
-     *                        edited are the ones currently in use by the processor.
-     * DEFINEs:
-     *   PTE_P           0x001                   // page table/directory entry flags bit : Present
-     */
-#if 0
-    if (0) {                      //(1) check if page directory is present
-        struct Page *page = NULL; //(2) find corresponding page to pte
-                                  //(3) decrease page reference
-                                  //(4) and free this page when page reference reachs 0
-                                  //(5) clear second page table entry
-                                  //(6) flush tlb
+
+/*
+ 设计思路：
+首先判断一下 ptep 是不是合法——检查一下 Present 位就是了。
+然后通过注释中所说的，通过 pte2page(*ptep) 获取相应页，减少引用计数并决定是否释放页。
+最后把 TLB 中该页的缓存刷掉就可以了。
+--------------------------------------------------------------------------------------------
+*/
+static inline void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {
+    if ((*ptep & PTE_P)) { //判断页表中该表项是否存在
+        struct Page *page = pte2page(*ptep);// 将页表项转换为页数据结构
+        if (page_ref_dec(page) == 0) { // 判断是否只被引用了一次，若引用计数减一后为0，则释放该物理页
+            free_page(page);
+        }
+        *ptep = 0; // //如果被多次引用，则不能释放此页，只用释放二级页表的表项，清空 PTE
+        tlb_invalidate(pgdir, la); // 刷新 tlb
     }
-#endif
-
 }
 
 //page_remove - free an Page which is related linear address la and has an validated pte
