@@ -415,10 +415,9 @@ get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store) {
 
 //page_remove_pte - free an Page sturct which is related linear address la
 //                - and clean(invalidate) pte which is related linear address la
-//note: PT is changed, so the TLB need to be invalidate 
-static inline void
-page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {
-    /* LAB2 EXERCISE 3: YOUR CODE
+//note: PT is changed, so the TLB need to be invalidate
+
+/* LAB2 EXERCISE 3: YOUR CODE
      *
      * Please check if ptep is valid, and tlb must be manually updated if mapping is updated
      *
@@ -434,16 +433,20 @@ page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {
      * DEFINEs:
      *   PTE_P           0x001                   // page table/directory entry flags bit : Present
      */
-#if 0
-    if (0) {                      //(1) check if page directory is present
-        struct Page *page = NULL; //(2) find corresponding page to pte
-                                  //(3) decrease page reference
-                                  //(4) and free this page when page reference reachs 0
-                                  //(5) clear second page table entry
-                                  //(6) flush tlb
-    }
-#endif
+static inline void
+page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {
 
+    if ((*ptep & PTE_P)) //判断页表中该表项ptep是否存在
+    {
+        struct Page *page = pte2page(*ptep); // 获得*ptep指针（页表项）指向的页
+        if (page_ref_dec(page) == 0)         // 若引用计数减一后为0，则释放该物理页
+        { 
+            free_page(page);
+        }
+        *ptep = 0;                 // 如果被多次引用，则不能释放此页，只用释放二级页表的表项，清空 PTE
+        // PT is changed, so the TLB need to be invalidate
+        tlb_invalidate(pgdir, la); // 将刚刚对页表进行的操作更新到TLB中
+    }
 }
 
 //page_remove - free an Page which is related linear address la and has an validated pte
