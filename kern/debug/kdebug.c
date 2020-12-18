@@ -3,7 +3,10 @@
 #include <stab.h>
 #include <stdio.h>
 #include <string.h>
+#include <memlayout.h>
 #include <sync.h>
+#include <vmm.h>
+#include <proc.h>
 #include <kdebug.h>
 #include <kmonitor.h>
 #include <assert.h>
@@ -23,6 +26,14 @@ struct eipdebuginfo {
     int eip_fn_namelen;                     // length of function's name
     uintptr_t eip_fn_addr;                  // start address of function
     int eip_fn_narg;                        // number of function arguments
+};
+
+/* user STABS data structure  */
+struct userstabdata {
+    const struct stab *stabs;
+    const struct stab *stab_end;
+    const char *stabstr;
+    const char *stabstr_end;
 };
 
 /* *
@@ -130,10 +141,41 @@ debuginfo_eip(uintptr_t addr, struct eipdebuginfo *info) {
     info->eip_fn_addr = addr;
     info->eip_fn_narg = 0;
 
-    stabs = __STAB_BEGIN__;
-    stab_end = __STAB_END__;
-    stabstr = __STABSTR_BEGIN__;
-    stabstr_end = __STABSTR_END__;
+    // find the relevant set of stabs
+    if (addr >= KERNBASE) {
+        stabs = __STAB_BEGIN__;
+        stab_end = __STAB_END__;
+        stabstr = __STABSTR_BEGIN__;
+        stabstr_end = __STABSTR_END__;
+    }
+    else {
+        // user-program linker script, tools/user.ld puts the information about the
+        // program's stabs (included __STAB_BEGIN__, __STAB_END__, __STABSTR_BEGIN__,
+        // and __STABSTR_END__) in a structure located at virtual address USTAB.
+        const struct userstabdata *usd = (struct userstabdata *)USTAB;
+
+        // make sure that debugger (current process) can access this memory
+        struct mm_struct *mm;
+        if (current == NULL || (mm = current->mm) == NULL) {
+            return -1;
+        }
+        if (!user_mem_check(mm, (uintptr_t)usd, sizeof(struct userstabdata), 0)) {
+            return -1;
+        }
+
+        stabs = usd->stabs;
+        stab_end = usd->stab_end;
+        stabstr = usd->stabstr;
+        stabstr_end = usd->stabstr_end;
+
+        // make sure the STABS and string table memory is valid
+        if (!user_mem_check(mm, (uintptr_t)stabs, (uintptr_t)stab_end - (uintptr_t)stabs, 0)) {
+            return -1;
+        }
+        if (!user_mem_check(mm, (uintptr_t)stabstr, stabstr_end - stabstr, 0)) {
+            return -1;
+        }
+    }
 
     // String table validity checks
     if (stabstr_end <= stabstr || stabstr_end[-1] != 0) {
@@ -294,35 +336,19 @@ read_eip(void) {
 void
 print_stackframe(void) {
      /* LAB1 YOUR CODE : STEP 1 */
+     /* (1) call read_ebp() to get the value of ebp. the type is (uint32_t);
+      * (2) call read_eip() to get the value of eip. the type is (uint32_t);
+      * (3) from 0 .. STACKFRAME_DEPTH
+      *    (3.1) printf value of ebp, eip
+      *    (3.2) (uint32_t)calling arguments [0..4] = the contents in address (uint32_t)ebp +2 [0..4]
+      *    (3.3) cprintf("\n");
+      *    (3.4) call print_debuginfo(eip-1) to print the C calling function name and line number, etc.
+      *    (3.5) popup a calling stackframe
+      *           NOTICE: the calling funciton's return addr eip  = ss:[ebp+4]
+      *                   the calling funciton's ebp = ss:[ebp]
+      */
 
-     // (1) call read_ebp() to get the value of ebp.the type is(uint32_t)->其实就是int;
-     uint32_t *ebp = (uint32_t *)read_ebp(); // inline function, 指针类型
-
-     // (2) call read_eip() to get the value of eip. the type is (uint32_t);
-     uint32_t eip = read_eip();              // non-inline function
-
-     //(3) from 0 .. STACKFRAME_DEPTH
-     // ebp为0时终止
-     while (ebp)
-     {
-         // (3.1) printf value of ebp, eip
-         cprintf("ebp: 0x%08x eip: 0x%08x args: \n", (uint32_t)ebp, eip);
-
-         // (3.2) (uint32_t)calling arguments [0..4] = the contents in address (uint32_t)ebp +2 [0..4]
-         // ebp所指位置向上都为输入的参数，案例中给了四个args所以输出四个
-         cprintf("0x%08x 0x%08x 0x%08x 0x%08x\n", ebp[2], ebp[3], ebp[4], ebp[5]);
-
-         // (3.3)控制输出格式
-         cprintf("\n");
-
-         // (3.4) call print_debuginfo(eip-1) to print the C calling function name and line number, etc.
-         // eip指向的是当前位置的下一条指令地址，所以要-1
-         print_debuginfo(eip - 1);
-
-         // (3.5) popup a calling stackframe
-         //  *NOTICE : 指针运算时候的单位问题,例如一个int*类型的指针+1其实质地址值+4
-         eip = ((uint32_t *)ebp)[1];    // ebp指针指向的地址向上一个位置为上一个函数的eip
-         ebp = *ebp;    // ebp指针指向的地址存储了上一个函数的ebp
-         // 开弹！下一个函数！
-    }
+     
+  
 }
+
